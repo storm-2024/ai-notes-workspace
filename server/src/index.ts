@@ -1,7 +1,6 @@
 import dns from 'node:dns';
-
-// حل مشكلة DNS
 dns.setDefaultResultOrder('ipv4first');
+
 import express, { type Request, type Response } from 'express';
 import { createServer } from 'http';
 import cors from 'cors';
@@ -13,8 +12,11 @@ import noteRoutes from './routes/noteRoutes.ts';
 import { globalErrorHandler } from './middlewares/errorHandler.ts';
 
 const app = express();
-const httpServer = createServer(app); // إنشاء خادم HTTP ليدعم Express و Socket.io معاً
+const httpServer = createServer(app);
 const PORT = process.env.PORT || 5000;
+
+// الوثوق في وكيل الاستضافة السحابية (Railway / Nginx) لعمل Rate Limiter بدقة
+app.set('trust proxy', 1);
 
 // 1. تهيئة قاعدة البيانات والاتصال اللحظي
 connectDB();
@@ -25,7 +27,7 @@ app.use(helmet());
 app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:5173',
 }));
-app.use(express.json({ limit: '10kb' })); // حماية من إرسال حمولات ضخمة
+app.use(express.json({ limit: '10kb' }));
 
 // تحديد معدل الطلبات (100 طلب كل 15 دقيقة لكل IP)
 const limiter = rateLimit({
@@ -42,10 +44,9 @@ app.get('/api/health', (req: Request, res: Response) => {
 
 app.use('/api/notes', noteRoutes);
 
-// 4. معالج الأخطاء المركزي (يجب أن يكون في النهاية دائماً)
+// 4. معالج الأخطاء المركزي
 app.use(globalErrorHandler);
 
-// تشغيل الخادم عبر httpServer بدلاً من app.listen
 httpServer.listen(PORT, () => {
   console.log(`Server & WebSockets running on http://localhost:${PORT}`);
 });

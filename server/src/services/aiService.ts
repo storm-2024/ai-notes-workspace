@@ -21,6 +21,12 @@ interface ChatCompletionResponse {
   }>;
 }
 
+interface GroqModelsResponse {
+  data?: Array<{
+    id: string;
+  }>;
+}
+
 /**
  * تحويل النص إلى متجه رقمي (Embedding Vector) للبحث الدلالي
  */
@@ -47,8 +53,77 @@ export const generateEmbedding = async (text: string): Promise<number[]> => {
 };
 
 /**
+ * دالة مساعدة لاستدعاء Groq API مع اختيار تلقائي لأفضل نموذج متاح في الحساب
+ */
+const callGroqWithFallback = async (
+  groqKey: string,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<string> => {
+  const groqHost = 'api' + '.groq.com';
+  const chatUrl = `https://${groqHost}/openai/v1/chat/completions`;
+
+  // محاولة استخدام النموذج السريع المعتمد أولاً
+  let selectedModel = 'llama-3.1-8b-instant';
+
+  const makeRequest = async (modelId: string) => {
+    return fetch(chatUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${groqKey}`,
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.2,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+  };
+
+  let response = await makeRequest(selectedModel);
+
+  // إذا تغير اسم النموذج مستقبلاً (404)، نجلب قائمة النماذج المتاحة في حسابك تلقائياً
+  if (response.status === 404) {
+    console.warn(`Model ${selectedModel} not found on Groq, fetching available models...`);
+    const modelsRes = await fetch(`https://${groqHost}/openai/v1/models`, {
+      headers: { Authorization: `Bearer ${groqKey}` },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (modelsRes.ok) {
+      const modelsData = (await modelsRes.json()) as GroqModelsResponse;
+      const availableChatModel = modelsData.data?.find(
+        (m) =>
+          !m.id.includes('whisper') &&
+          !m.id.includes('guard') &&
+          !m.id.includes('tts')
+      );
+
+      if (availableChatModel) {
+        selectedModel = availableChatModel.id;
+        console.log(`Switching dynamically to Groq model: ${selectedModel}`);
+        response = await makeRequest(selectedModel);
+      }
+    }
+  }
+
+  const data = (await response.json()) as ChatCompletionResponse;
+
+  if (!response.ok) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data.choices?.at(0)?.message?.content || 'عذراً، لم أتمكن من صياغة إجابة.';
+};
+
+/**
  * توليد إجابة ذكية بناءً على الملاحظات المسترجعة فقط (تقنية RAG)
- * مع التحويل التلقائي الفوري إلى Groq Llama 3.3 عند انشغال خوادم Gemini
+ * مع التحويل التلقائي الفوري إلى Groq عند انشغال خوادم Gemini
  */
 export const generateAnswer = async (
   question: string,
@@ -91,35 +166,9 @@ export const generateAnswer = async (
     }
   }
 
-  // 2. البديل السحابي فائق السرعة عبر Groq API (Llama 3.3 70B)
+  // 2. البديل السحابي فائق السرعة عبر Groq API
   if (groqKey) {
-    const groqHost = 'api' + '.groq.com';
-    const groqUrl = `https://${groqHost}/openai/v1/chat/completions`;
-
-    const response = await fetch(groqUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${groqKey}`,
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.2,
-      }),
-      signal: AbortSignal.timeout(10000),
-    });
-
-    const data = (await response.json()) as ChatCompletionResponse;
-
-    if (!response.ok) {
-      throw new Error(JSON.stringify(data));
-    }
-
-    return data.choices?.at(0)?.message?.content || 'عذراً، لم أتمكن من صياغة إجابة.';
+    return callGroqWithFallback(groqKey, systemPrompt, userPrompt);
   }
 
   throw new Error('503 UNAVAILABLE: خوادم الذكاء الاصطناعي مزدحمة حالياً.');
