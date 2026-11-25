@@ -21,12 +21,6 @@ interface ChatCompletionResponse {
   }>;
 }
 
-interface GroqModelsResponse {
-  data?: Array<{
-    id: string;
-  }>;
-}
-
 /**
  * تحويل النص إلى متجه رقمي (Embedding Vector) للبحث الدلالي
  */
@@ -53,7 +47,7 @@ export const generateEmbedding = async (text: string): Promise<number[]> => {
 };
 
 /**
- * دالة مساعدة لاستدعاء Groq API مع اختيار تلقائي لأفضل نموذج متاح في الحساب
+ * دالة مساعدة لاستدعاء Groq API بالترتيب عبر النماذج الفعلية المفعلة في الحساب
  */
 const callGroqWithFallback = async (
   groqKey: string,
@@ -63,62 +57,48 @@ const callGroqWithFallback = async (
   const groqHost = 'api' + '.groq.com';
   const chatUrl = `https://${groqHost}/openai/v1/chat/completions`;
 
-  // محاولة استخدام النموذج السريع المعتمد أولاً
-  let selectedModel = 'llama-3.1-8b-instant';
+  // النماذج الفعلية المفعلة في حسابك بالترتيب حسب الدقة والسرعة
+  const groqModels = ['qwen/qwen3.8-27b', 'openai/gpt-oss-20b', 'allam-2-7b'];
+  let lastErrorText = '';
 
-  const makeRequest = async (modelId: string) => {
-    return fetch(chatUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${groqKey}`,
-      },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.2,
-      }),
-      signal: AbortSignal.timeout(10000),
-    });
-  };
+  for (const modelId of groqModels) {
+    try {
+      const response = await fetch(chatUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${groqKey}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.2,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
 
-  let response = await makeRequest(selectedModel);
+      const data = (await response.json()) as ChatCompletionResponse;
 
-  // إذا تغير اسم النموذج مستقبلاً (404)، نجلب قائمة النماذج المتاحة في حسابك تلقائياً
-  if (response.status === 404) {
-    console.warn(`Model ${selectedModel} not found on Groq, fetching available models...`);
-    const modelsRes = await fetch(`https://${groqHost}/openai/v1/models`, {
-      headers: { Authorization: `Bearer ${groqKey}` },
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (modelsRes.ok) {
-      const modelsData = (await modelsRes.json()) as GroqModelsResponse;
-      const availableChatModel = modelsData.data?.find(
-        (m) =>
-          !m.id.includes('whisper') &&
-          !m.id.includes('guard') &&
-          !m.id.includes('tts')
-      );
-
-      if (availableChatModel) {
-        selectedModel = availableChatModel.id;
-        console.log(`Switching dynamically to Groq model: ${selectedModel}`);
-        response = await makeRequest(selectedModel);
+      if (response.ok) {
+        const content = data.choices?.at(0)?.message?.content;
+        // تنظيف وسوم التفكير الداخلية (<think>...</think>) إن وجدت في نماذج Qwen
+        if (content) {
+          return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+        }
       }
+
+      lastErrorText = JSON.stringify(data);
+      console.warn(`Groq model ${modelId} failed (${response.status}), trying next...`);
+    } catch (err) {
+      lastErrorText = err instanceof Error ? err.message : 'Groq request timeout';
+      console.warn(`Groq model ${modelId} error, trying next...`);
     }
   }
 
-  const data = (await response.json()) as ChatCompletionResponse;
-
-  if (!response.ok) {
-    throw new Error(JSON.stringify(data));
-  }
-
-  return data.choices?.at(0)?.message?.content || 'عذراً، لم أتمكن من صياغة إجابة.';
+  throw new Error(lastErrorText);
 };
 
 /**
